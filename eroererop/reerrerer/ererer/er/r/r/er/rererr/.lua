@@ -930,6 +930,7 @@ function Library.CreateWindow(arg1, arg2)
 	-- 4 слоя вместо 8: суммарная толщина обводки та же (до 20px),
 	-- но full-screen UIStroke-ов рендерится вдвое меньше.
 	local shadowLayers = 4
+	local fadeStrokes = {}
 	for i = 1, shadowLayers do
 		local trans = 0.78 + (i * 0.045)
 		local shadow = Instance.new("Frame")
@@ -956,6 +957,7 @@ function Library.CreateWindow(arg1, arg2)
 		shadowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		shadowStroke.Enabled = SIDEBAR_STATE.ShadowsEnabled
 		shadowStroke.Parent = shadow
+		fadeStrokes[#fadeStrokes + 1] = { stroke = shadowStroke, base = trans }
 
 		local sidebarShadow = Instance.new("Frame")
 		sidebarShadow.Name = "ShadowLayer" .. i
@@ -981,9 +983,12 @@ function Library.CreateWindow(arg1, arg2)
 		sidebarShadowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		sidebarShadowStroke.Enabled = (SIDEBAR_STATE.ShadowsEnabled and SIDEBAR_STATE.Detached)
 		sidebarShadowStroke.Parent = sidebarShadow
+		fadeStrokes[#fadeStrokes + 1] = { stroke = sidebarShadowStroke, base = trans }
 	end
 
-	local main = Instance.new("CanvasGroup")
+	-- CanvasGroup держит весь UI в отдельном offscreen-буфере. Если FPS
+	-- низкий даже в покое — передай config.UseCanvasGroup = false.
+	local main = (config.UseCanvasGroup == false) and Instance.new("Frame") or Instance.new("CanvasGroup")
 	main.Name = "MainFrame"
 	main.Size = UDim2.new(1, 0, 1, 0)
 	main.Position = UDim2.new(0, 0, 0, 0)
@@ -2237,6 +2242,7 @@ function Library.CreateWindow(arg1, arg2)
 	end))
 
 	local isDestroyed, isUIOpen = false, true
+	local FAST = (config.FastAnimations == true)
 	local animInfo = TweenInfo.new(0.25, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
 	local currentActiveTween = nil
 
@@ -2252,6 +2258,25 @@ function Library.CreateWindow(arg1, arg2)
 		end
 	end
 
+	-- Плавное затухание через GroupTransparency на CanvasGroup с сотнями
+	-- потомков заставляет Roblox каждый кадр пересчитывать весь group-alpha
+	-- проход — это и есть пролаг при открытии/закрытии. Ставим сразу,
+	-- а анимируем только дешёвое смещение позиции.
+	local function applyFade(alpha)
+		if main:IsA("CanvasGroup") then main.GroupTransparency = alpha end
+		mainOutlineStroke.Transparency = alpha
+		if sidebarOutlineStroke.Enabled then sidebarOutlineStroke.Transparency = alpha end
+		arcOuterStroke.Transparency = alpha
+		topbarDivider.BackgroundTransparency = alpha
+		sidebarDivider.BackgroundTransparency = alpha
+		local shadowsOn = SIDEBAR_STATE.ShadowsEnabled
+		for i = 1, #fadeStrokes do
+			local e = fadeStrokes[i]
+			e.stroke.Enabled = shadowsOn and (i <= shadowLayers or SIDEBAR_STATE.Detached)
+			e.stroke.Transparency = (alpha == 0) and e.base or 1
+		end
+	end
+
 	local function PlayFadeAnim(show)
 		if currentActiveTween then
 			currentActiveTween:Cancel()
@@ -2260,77 +2285,33 @@ function Library.CreateWindow(arg1, arg2)
 
 		local aType = THEME.CloseAnimation or 1
 		local hidePos, hideSize = getAnimHideTransform(aType)
+		applyFade(show and 0 or 1)
+
+		if FAST then
+			wrapper.Visible = show
+			contentWrapper.Position = show and UDim2.new(0, 0, 0, 0) or hidePos
+			if not show then Window.ClosePopup() end
+			return
+		end
 		
 		if show then
 			wrapper.Visible = true
 			contentWrapper.Position = hidePos
-			contentWrapper.Size = hideSize
+			-- Size у tipo 3 дёргал AutomaticSize-_layout каждый кадр.
+			contentWrapper.Size = UDim2.new(1, 0, 1, 0)
 			
 			currentActiveTween = TS:Create(contentWrapper, animInfo, {
-				Position = UDim2.new(0, 0, 0, 0),
-				Size = UDim2.new(1, 0, 1, 0)
+				Position = UDim2.new(0, 0, 0, 0)
 			})
 			currentActiveTween:Play()
-			
-			TS:Create(main, animInfo, {GroupTransparency = 0}):Play()
-			
-			if THEME.MainOutlineEnabled then
-				TS:Create(mainOutlineStroke, animInfo, {Transparency = 0}):Play()
-				if SIDEBAR_STATE.Detached then
-					sidebarOutlineStroke.Enabled = true
-					TS:Create(sidebarOutlineStroke, animInfo, {Transparency = 0}):Play()
-				end
-			end
-			
-			if SIDEBAR_STATE.ShadowsEnabled then
-				for _, shadow in ipairs(shadowFolder:GetChildren()) do
-					local stroke = shadow:FindFirstChild("ShadowStroke")
-					if stroke then 
-						stroke.Enabled = true
-						TS:Create(stroke, animInfo, {Transparency = stroke:GetAttribute("TargetTransparency") or 0.8}):Play() 
-					end
-				end
-				if SIDEBAR_STATE.Detached then
-					for _, shadow in ipairs(sidebarShadowFolder:GetChildren()) do
-						local stroke = shadow:FindFirstChild("ShadowStroke")
-						if stroke then 
-							stroke.Enabled = true
-							TS:Create(stroke, animInfo, {Transparency = stroke:GetAttribute("TargetTransparency") or 0.8}):Play() 
-						end
-					end
-				end
-			end
-			TS:Create(arcOuterStroke, animInfo, {Transparency = 0}):Play()
-			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 0}):Play()
-			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 0}):Play()
-			
 		else
 			Window.ClosePopup()
 			
 			currentActiveTween = TS:Create(contentWrapper, animInfo, {
-				Position = hidePos,
-				Size = hideSize
+				Position = hidePos
 			})
 			currentActiveTween:Play()
-			
-			TS:Create(main, animInfo, {GroupTransparency = 1}):Play()
-			TS:Create(mainOutlineStroke, animInfo, {Transparency = 1}):Play()
-			if sidebarOutlineStroke.Enabled then
-				TS:Create(sidebarOutlineStroke, animInfo, {Transparency = 1}):Play()
-			end
-			
-			for _, shadow in ipairs(shadowFolder:GetChildren()) do
-				local stroke = shadow:FindFirstChild("ShadowStroke")
-				if stroke then TS:Create(stroke, animInfo, {Transparency = 1}):Play() end
-			end
-			for _, shadow in ipairs(sidebarShadowFolder:GetChildren()) do
-				local stroke = shadow:FindFirstChild("ShadowStroke")
-				if stroke then TS:Create(stroke, animInfo, {Transparency = 1}):Play() end
-			end
-			TS:Create(arcOuterStroke, animInfo, {Transparency = 1}):Play()
-			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 1}):Play()
-			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 1}):Play()
-			
+			if aType == 3 then contentWrapper.Size = hideSize end
 			
 			local animRef = currentActiveTween
 			animRef.Completed:Connect(function()
@@ -5682,11 +5663,13 @@ function Library.CreateWindow(arg1, arg2)
 				TS:Create(tabBtnPadding, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 0)}):Play() 
 			end
 	
-			page.Position = UDim2.new(0, 0, 0, 8)
+			page.Position = UDim2.new(0, 0, 0, FAST and 0 or 8)
 			page.Visible = true
-			TS:Create(page, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
-				Position = UDim2.new(0, 0, 0, 0)
-			}):Play()
+			if not FAST then
+				TS:Create(page, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+					Position = UDim2.new(0, 0, 0, 0)
+				}):Play()
+			end
 		end
 		
 		table.insert(Window._connections, tabButton.MouseButton1Click:Connect(activateTab))
