@@ -11,12 +11,10 @@ local HttpService = game:GetService("HttpService")
 local StatsService = game:GetService("Stats")
 local isMobile = UIS.TouchEnabled
 
-local FS_CACHE
 local function getFS()
-    if FS_CACHE then return FS_CACHE end
     local g = (getgenv and getgenv()) or _G or {}
     local env = (getfenv and getfenv()) or {}
-    FS_CACHE = {
+    return {
         isfolder = isfolder or env.isfolder or g.isfolder,
         makefolder = makefolder or env.makefolder or g.makefolder,
         listfiles = listfiles or listdir or env.listfiles or env.listdir or g.listfiles or g.listdir,
@@ -24,7 +22,6 @@ local function getFS()
         writefile = writefile or env.writefile or g.writefile,
         delfile = delfile or deletefile or env.delfile or env.deletefile or g.delfile or g.deletefile
     }
-    return FS_CACHE
 end
 
 local function safeIsFolder(path)
@@ -118,36 +115,24 @@ local function getFirstChar(str)
 	return string.upper(string.sub(str, 1, 1))
 end
 
-local dotsWidthCache = {}
 local function truncateTwoDots(text, font, size, maxW)
 	if not text or text == "" then return "" end
 	if maxW <= 10 then return ".." end
-	local measureVec = Vector2.new(10000, 100)
-	if TextService:GetTextSize(text, size, font, measureVec).X <= maxW then return text end
-	local cacheKey = tostring(font) .. "|" .. tostring(size)
-	local dotsW = dotsWidthCache[cacheKey]
-	if not dotsW then
-		dotsW = TextService:GetTextSize("..", size, font, measureVec).X
-		dotsWidthCache[cacheKey] = dotsW
-	end
+	local full = TextService:GetTextSize(text, size, font, Vector2.new(10000, 100))
+	if full.X <= maxW then return text end
+	local dotsW = TextService:GetTextSize("..", size, font, Vector2.new(10000, 100)).X
 	local avail = maxW - dotsW
 	if avail <= 0 then return ".." end
 	local len = utf8.len(text) or #text
-	local lo, hi, best = 1, len, 0
-	while lo <= hi do
-		local mid = math.floor((lo + hi) / 2)
-		local offset = utf8.offset(text, mid + 1)
-		local sub = string.sub(text, 1, offset and (offset - 1) or mid)
-		if TextService:GetTextSize(sub, size, font, measureVec).X <= avail then
-			best = mid
-			lo = mid + 1
-		else
-			hi = mid - 1
+	for i = len, 1, -1 do
+		local offset = utf8.offset(text, i + 1)
+		local sub = string.sub(text, 1, offset and (offset - 1) or i)
+		local s = TextService:GetTextSize(sub, size, font, Vector2.new(10000, 100))
+		if s.X <= avail then
+			return sub .. ".."
 		end
 	end
-	if best == 0 then return ".." end
-	local offset = utf8.offset(text, best + 1)
-	return string.sub(text, 1, offset and (offset - 1) or best) .. ".."
+	return ".."
 end
 
 local Library = {}
@@ -183,20 +168,10 @@ local THEME = {
 	CloseAnimation = 1
 }
 
--- Реестр связей темы: вместо CS:GetTagged + GetAttributes (аллокации и O(n*m)
--- на каждое изменение темы) храним прямые ссылки со слабыми ключами.
--- Атрибуты/теги оставляем для совместимости с внешним кодом.
-local themeBindings = {}
 local function ApplyTheme(obj, themeKey, prop)
 	prop = prop or "BackgroundColor3"
 	obj:SetAttribute("ThemeProp_" .. prop, themeKey)
 	CS:AddTag(obj, "ThemeBind")
-	local binding = themeBindings[themeKey]
-	if not binding then
-		binding = setmetatable({}, { __mode = "k" })
-		themeBindings[themeKey] = binding
-	end
-	binding[obj] = prop
 	if prop == "Font" then
 		pcall(function() obj[prop] = Enum.Font[THEME[themeKey]] end)
 	elseif prop == "Image" and themeKey == "BackgroundImage" then
@@ -208,15 +183,18 @@ end
 
 local function UpdateTheme(themeKey, value)
 	THEME[themeKey] = value
-	local binding = themeBindings[themeKey]
-	if not binding then return end
-	for obj, prop in pairs(binding) do
-		if prop == "Font" then
-			pcall(function() obj[prop] = Enum.Font[value] end)
-		elseif prop == "Image" and themeKey == "BackgroundImage" then
-			obj[prop] = parseAsset(value)
-		else
-			obj[prop] = value
+	for _, obj in ipairs(CS:GetTagged("ThemeBind")) do
+		for attrName, attrValue in pairs(obj:GetAttributes()) do
+			if string.sub(attrName, 1, 10) == "ThemeProp_" and attrValue == themeKey then
+				local prop = string.sub(attrName, 11)
+				if prop == "Font" then
+					pcall(function() obj[prop] = Enum.Font[value] end)
+				elseif prop == "Image" and themeKey == "BackgroundImage" then
+					obj[prop] = parseAsset(value)
+				else
+					obj[prop] = value
+				end
+			end
 		end
 	end
 end
@@ -643,32 +621,34 @@ function Library.CreateWindow(arg1, arg2)
 		}):Play()
 
 		local startTime = os.clock()
-		-- Таймер уведомления обновляет текст с 10 Гц вместо RenderStepped
-		-- (60+ вызовов в секунду на каждое уведомление).
-		local timerActive = true
-		task.spawn(function()
-			local lastFormatted = ""
-			while timerActive and timeLabel.Parent do
-				local remaining = math.max(0, nDuration - (os.clock() - startTime))
-				local formatted = string.format("%.1fs", remaining)
-				if formatted ~= lastFormatted then
-					lastFormatted = formatted
-					timeLabel.Text = formatted
+		local connection
+		local lastFormatted = ""
+		connection = RS.RenderStepped:Connect(function()
+			local remaining = math.max(0, nDuration - (os.clock() - startTime))
+			local formatted = string.format("%.1fs", remaining)
+			if formatted ~= lastFormatted then
+				lastFormatted = formatted
+				timeLabel.Text = formatted
+			end
+			if remaining <= 0 then
+				if connection then 
+					connection:Disconnect() 
+					connection = nil 
 				end
-				if remaining <= 0 then break end
-				task.wait(0.1)
 			end
 		end)
 		
 		local function closeNotification()
-			timerActive = false
 			local fadeOut = TS:Create(notif, TweenInfo.new(0.4, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
 				BackgroundTransparency = 1,
 				Position = isNotifLeft and UDim2.new(0, -350, 0, 0) or UDim2.new(0, 350, 0, 0)
 			})
 			fadeOut:Play()
 			fadeOut.Completed:Connect(function()
-				timerActive = false
+				if connection then 
+					connection:Disconnect() 
+					connection = nil 
+				end
 				notifWrapper:Destroy()
 			end)
 		end
@@ -870,10 +850,7 @@ function Library.CreateWindow(arg1, arg2)
 	local editModeCC = Instance.new("ColorCorrectionEffect")
 	editModeCC.Name = "UI_EditMode_CC"
 	editModeCC.Saturation = 0
-	-- Раньше эффект всё время висел в Lighting: даже нейтральный
-	-- ColorCorrectionEffect заставляет Roblox делать full-screen post-process
-	-- каждый кадр. Подключаем только в режиме редактора.
-
+	editModeCC.Parent = Lighting
 	
 	local uiScaleValue = isMobile and 0.65 or 1
 	local finalW, finalH
@@ -927,12 +904,9 @@ function Library.CreateWindow(arg1, arg2)
 	sidebarShadowFolder.Visible = false
 	sidebarShadowFolder.Parent = contentWrapper
 
-	-- 4 слоя вместо 8: суммарная толщина обводки та же (до 20px),
-	-- но full-screen UIStroke-ов рендерится вдвое меньше.
-	local shadowLayers = 4
-	local fadeStrokes = {}
+	local shadowLayers = 8
 	for i = 1, shadowLayers do
-		local trans = 0.78 + (i * 0.045)
+		local trans = 0.8 + (i * 0.02)
 		local shadow = Instance.new("Frame")
 		shadow.Name = "ShadowLayer" .. i
 		shadow.BackgroundTransparency = 1
@@ -953,11 +927,10 @@ function Library.CreateWindow(arg1, arg2)
 		shadowStroke.Color = Color3.fromRGB(0, 0, 0)
 		shadowStroke.Transparency = trans
 		shadowStroke:SetAttribute("TargetTransparency", trans)
-		shadowStroke.Thickness = i * 5
+		shadowStroke.Thickness = i * 2.5
 		shadowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		shadowStroke.Enabled = SIDEBAR_STATE.ShadowsEnabled
 		shadowStroke.Parent = shadow
-		fadeStrokes[#fadeStrokes + 1] = { stroke = shadowStroke, base = trans }
 
 		local sidebarShadow = Instance.new("Frame")
 		sidebarShadow.Name = "ShadowLayer" .. i
@@ -979,16 +952,13 @@ function Library.CreateWindow(arg1, arg2)
 		sidebarShadowStroke.Color = Color3.fromRGB(0, 0, 0)
 		sidebarShadowStroke.Transparency = trans
 		sidebarShadowStroke:SetAttribute("TargetTransparency", trans)
-		sidebarShadowStroke.Thickness = i * 5
+		sidebarShadowStroke.Thickness = i * 2.5
 		sidebarShadowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		sidebarShadowStroke.Enabled = (SIDEBAR_STATE.ShadowsEnabled and SIDEBAR_STATE.Detached)
 		sidebarShadowStroke.Parent = sidebarShadow
-		fadeStrokes[#fadeStrokes + 1] = { stroke = sidebarShadowStroke, base = trans }
 	end
 
-	-- CanvasGroup держит весь UI в отдельном offscreen-буфере. Если FPS
-	-- низкий даже в покое — передай config.UseCanvasGroup = false.
-	local main = (config.UseCanvasGroup == false) and Instance.new("Frame") or Instance.new("CanvasGroup")
+	local main = Instance.new("CanvasGroup")
 	main.Name = "MainFrame"
 	main.Size = UDim2.new(1, 0, 1, 0)
 	main.Position = UDim2.new(0, 0, 0, 0)
@@ -1059,8 +1029,7 @@ function Library.CreateWindow(arg1, arg2)
 				end
 			end
 		end)
-		-- Самоочищающийся цикл: не кладём в _connections, иначе массив
-		-- бесконечно растёт при каждом перетаскивании окна.
+		table.insert(Window._connections, dragConn)
 	end
 
 	table.insert(Window._connections, dragArea.InputBegan:Connect(function(input)
@@ -2242,7 +2211,6 @@ function Library.CreateWindow(arg1, arg2)
 	end))
 
 	local isDestroyed, isUIOpen = false, true
-	local FAST = (config.FastAnimations == true)
 	local animInfo = TweenInfo.new(0.25, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
 	local currentActiveTween = nil
 
@@ -2258,25 +2226,6 @@ function Library.CreateWindow(arg1, arg2)
 		end
 	end
 
-	-- Плавное затухание через GroupTransparency на CanvasGroup с сотнями
-	-- потомков заставляет Roblox каждый кадр пересчитывать весь group-alpha
-	-- проход — это и есть пролаг при открытии/закрытии. Ставим сразу,
-	-- а анимируем только дешёвое смещение позиции.
-	local function applyFade(alpha)
-		if main:IsA("CanvasGroup") then main.GroupTransparency = alpha end
-		mainOutlineStroke.Transparency = alpha
-		if sidebarOutlineStroke.Enabled then sidebarOutlineStroke.Transparency = alpha end
-		arcOuterStroke.Transparency = alpha
-		topbarDivider.BackgroundTransparency = alpha
-		sidebarDivider.BackgroundTransparency = alpha
-		local shadowsOn = SIDEBAR_STATE.ShadowsEnabled
-		for i = 1, #fadeStrokes do
-			local e = fadeStrokes[i]
-			e.stroke.Enabled = shadowsOn and (i <= shadowLayers or SIDEBAR_STATE.Detached)
-			e.stroke.Transparency = (alpha == 0) and e.base or 1
-		end
-	end
-
 	local function PlayFadeAnim(show)
 		if currentActiveTween then
 			currentActiveTween:Cancel()
@@ -2285,33 +2234,77 @@ function Library.CreateWindow(arg1, arg2)
 
 		local aType = THEME.CloseAnimation or 1
 		local hidePos, hideSize = getAnimHideTransform(aType)
-		applyFade(show and 0 or 1)
-
-		if FAST then
-			wrapper.Visible = show
-			contentWrapper.Position = show and UDim2.new(0, 0, 0, 0) or hidePos
-			if not show then Window.ClosePopup() end
-			return
-		end
 		
 		if show then
 			wrapper.Visible = true
 			contentWrapper.Position = hidePos
-			-- Size у tipo 3 дёргал AutomaticSize-_layout каждый кадр.
-			contentWrapper.Size = UDim2.new(1, 0, 1, 0)
+			contentWrapper.Size = hideSize
 			
 			currentActiveTween = TS:Create(contentWrapper, animInfo, {
-				Position = UDim2.new(0, 0, 0, 0)
+				Position = UDim2.new(0, 0, 0, 0),
+				Size = UDim2.new(1, 0, 1, 0)
 			})
 			currentActiveTween:Play()
+			
+			TS:Create(main, animInfo, {GroupTransparency = 0}):Play()
+			
+			if THEME.MainOutlineEnabled then
+				TS:Create(mainOutlineStroke, animInfo, {Transparency = 0}):Play()
+				if SIDEBAR_STATE.Detached then
+					sidebarOutlineStroke.Enabled = true
+					TS:Create(sidebarOutlineStroke, animInfo, {Transparency = 0}):Play()
+				end
+			end
+			
+			if SIDEBAR_STATE.ShadowsEnabled then
+				for _, shadow in ipairs(shadowFolder:GetChildren()) do
+					local stroke = shadow:FindFirstChild("ShadowStroke")
+					if stroke then 
+						stroke.Enabled = true
+						TS:Create(stroke, animInfo, {Transparency = stroke:GetAttribute("TargetTransparency") or 0.8}):Play() 
+					end
+				end
+				if SIDEBAR_STATE.Detached then
+					for _, shadow in ipairs(sidebarShadowFolder:GetChildren()) do
+						local stroke = shadow:FindFirstChild("ShadowStroke")
+						if stroke then 
+							stroke.Enabled = true
+							TS:Create(stroke, animInfo, {Transparency = stroke:GetAttribute("TargetTransparency") or 0.8}):Play() 
+						end
+					end
+				end
+			end
+			TS:Create(arcOuterStroke, animInfo, {Transparency = 0}):Play()
+			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 0}):Play()
+			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 0}):Play()
+			
 		else
 			Window.ClosePopup()
 			
 			currentActiveTween = TS:Create(contentWrapper, animInfo, {
-				Position = hidePos
+				Position = hidePos,
+				Size = hideSize
 			})
 			currentActiveTween:Play()
-			if aType == 3 then contentWrapper.Size = hideSize end
+			
+			TS:Create(main, animInfo, {GroupTransparency = 1}):Play()
+			TS:Create(mainOutlineStroke, animInfo, {Transparency = 1}):Play()
+			if sidebarOutlineStroke.Enabled then
+				TS:Create(sidebarOutlineStroke, animInfo, {Transparency = 1}):Play()
+			end
+			
+			for _, shadow in ipairs(shadowFolder:GetChildren()) do
+				local stroke = shadow:FindFirstChild("ShadowStroke")
+				if stroke then TS:Create(stroke, animInfo, {Transparency = 1}):Play() end
+			end
+			for _, shadow in ipairs(sidebarShadowFolder:GetChildren()) do
+				local stroke = shadow:FindFirstChild("ShadowStroke")
+				if stroke then TS:Create(stroke, animInfo, {Transparency = 1}):Play() end
+			end
+			TS:Create(arcOuterStroke, animInfo, {Transparency = 1}):Play()
+			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 1}):Play()
+			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 1}):Play()
+			
 			
 			local animRef = currentActiveTween
 			animRef.Completed:Connect(function()
@@ -2475,27 +2468,25 @@ function Library.CreateWindow(arg1, arg2)
 	table.insert(Window._styleCallbacks, updateThemeLayout)
 	updateThemeLayout(THEME.ElementStyle)
 
+	local editModeLoop
 	Window.ToggleEditMode = function(state)
 		Window.IsEditMode = state
 		if state then
-			-- Свойства мыши выставляем один раз, а не каждый кадр.
-			UIS.MouseIconEnabled = true
-			UIS.MouseBehavior = Enum.MouseBehavior.Default
+			editModeLoop = RS.RenderStepped:Connect(function()
+				UIS.MouseIconEnabled = true
+				UIS.MouseBehavior = Enum.MouseBehavior.Default
+			end)
 			CAS:BindAction("AxiomEditSink", function() return Enum.ContextActionResult.Sink end, false,
 				Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseButton3,
 				Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space
 			)
-			editModeCC.Parent = Lighting
 			TS:Create(editModeCC, TweenInfo.new(0.5), {Saturation = -1}):Play()
 			TS:Create(gridOverlay, TweenInfo.new(0.5), {ImageTransparency = 0.93}):Play()
 			themeEditorContainer.Visible = true
 		else
+			if editModeLoop then editModeLoop:Disconnect(); editModeLoop = nil end
 			CAS:UnbindAction("AxiomEditSink")
-			local ccFade = TS:Create(editModeCC, TweenInfo.new(0.5), {Saturation = 0})
-			ccFade.Completed:Connect(function()
-				if not Window.IsEditMode then editModeCC.Parent = nil end
-			end)
-			ccFade:Play()
+			TS:Create(editModeCC, TweenInfo.new(0.5), {Saturation = 0}):Play()
 			TS:Create(gridOverlay, TweenInfo.new(0.5), {ImageTransparency = 1}):Play()
 			themeEditorContainer.Visible = false
 		end
@@ -3144,75 +3135,101 @@ function Library.CreateWindow(arg1, arg2)
 				for _, btn in ipairs(scroll:GetChildren()) do
 					if btn:IsA("TextButton") then
 						local optName = btn.Name:sub(8)
-						if isMulti and table.find(selectedItems, optName) then
-							ApplyTheme(btn, "Accent", "TextColor3")
-						else
-							ApplyTheme(btn, "Text", "TextColor3")
+						local wantKey = (isMulti and table.find(selectedItems, optName)) and "Accent" or "Text"
+						if btn:GetAttribute("ThemeProp_TextColor3") ~= wantKey then
+							ApplyTheme(btn, wantKey, "TextColor3")
 						end
 					end
 				end
 			end
 
+			-- [PERF PATCH] diff-based option list: reuse buttons, destroy only removed ones,
+			-- and keep per-button connections local so they can be disconnected (no leak in Window._connections).
+			local optionButtons = {}
+			local function sameList(a, b)
+				if a == b then return true end
+				if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
+				for i = 1, #a do if a[i] ~= b[i] then return false end end
+				return true
+			end
+
+			local function createOptionButton(opt)
+				local btn = Instance.new("TextButton")
+				btn.Name = "Option_" .. opt
+				btn.Size = UDim2.new(1, 0, 0, 24)
+				btn.BackgroundTransparency = 1
+				btn.BorderSizePixel = 0
+				btn.AutoButtonColor = false
+				btn.TextSize = 12
+				btn.Text = opt
+				btn.TextXAlignment = Enum.TextXAlignment.Center
+				btn.TextTruncate = Enum.TextTruncate.AtEnd
+				btn.Font = Enum.Font.Gotham
+				btn.ZIndex = 100002
+				btn.Parent = scroll
+				ApplyTheme(btn, "TextFont", "Font")
+
+				local btnCorner = Instance.new("UICorner")
+				btnCorner.CornerRadius = GLOBAL_CORNER
+				btnCorner.Parent = btn
+				CS:AddTag(btnCorner, "ElementCorner")
+
+				local conns = {}
+				conns[#conns + 1] = btn.MouseEnter:Connect(function()
+					TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = THEME.ElementTrans}):Play()
+					ApplyTheme(btn, "ElementHover", "BackgroundColor3")
+				end)
+				conns[#conns + 1] = btn.MouseLeave:Connect(function()
+					TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+				end)
+				conns[#conns + 1] = btn.MouseButton1Click:Connect(function()
+					if isMulti then
+						local idx = table.find(selectedItems, opt)
+						if idx then
+							table.remove(selectedItems, idx)
+						else
+							if #selectedItems < maxSelections then
+								table.insert(selectedItems, opt)
+							end
+						end
+						local txt = #selectedItems > 0 and table.concat(selectedItems, ", ") or "Select..."
+						selectedText.Text = txt
+						headerText.Text = txt
+						callback(selectedItems)
+						updateVisuals()
+					else
+						selectedItem = opt
+						selectedText.Text = opt
+						headerText.Text = opt
+						callback(opt)
+						Window.ClosePopup()
+					end
+				end)
+				return {btn = btn, conns = conns}
+			end
+
 			local function buildOptions(optsList)
 				options = optsList
-				for _, child in ipairs(scroll:GetChildren()) do
-					if child:IsA("TextButton") then child:Destroy() end
+				local wanted = {}
+				for _, opt in ipairs(options) do wanted[opt] = true end
+				for opt, rec in pairs(optionButtons) do
+					if not wanted[opt] then
+						for _, c in ipairs(rec.conns) do c:Disconnect() end
+						rec.btn:Destroy()
+						optionButtons[opt] = nil
+					end
 				end
-				for _, opt in ipairs(options) do
-					local btn = Instance.new("TextButton")
-					btn.Name = "Option_" .. opt
-					btn.Size = UDim2.new(1, 0, 0, 24)
-					btn.BackgroundTransparency = 1
-					btn.BorderSizePixel = 0
-					btn.AutoButtonColor = false
-					btn.TextSize = 12
-					btn.Text = opt
-					btn.TextXAlignment = Enum.TextXAlignment.Center
-					btn.TextTruncate = Enum.TextTruncate.AtEnd
-					btn.Font = Enum.Font.Gotham
-					btn.ZIndex = 100002
-					btn.Parent = scroll
-					ApplyTheme(btn, "TextFont", "Font")
-					
-					local btnCorner = Instance.new("UICorner")
-					btnCorner.CornerRadius = GLOBAL_CORNER
-					btnCorner.Parent = btn
-					CS:AddTag(btnCorner, "ElementCorner")
-
-					table.insert(Window._connections, btn.MouseEnter:Connect(function() 
-						TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = THEME.ElementTrans}):Play()
-						ApplyTheme(btn, "ElementHover", "BackgroundColor3")
-					end))
-					table.insert(Window._connections, btn.MouseLeave:Connect(function() 
-						TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
-					end))
-					table.insert(Window._connections, btn.MouseButton1Click:Connect(function()
-						if isMulti then
-							local idx = table.find(selectedItems, opt)
-							if idx then
-								table.remove(selectedItems, idx)
-							else
-								if #selectedItems < maxSelections then
-									table.insert(selectedItems, opt)
-								end
-							end
-							local txt = #selectedItems > 0 and table.concat(selectedItems, ", ") or "Select..."
-							selectedText.Text = txt
-							headerText.Text = txt
-							callback(selectedItems)
-							updateVisuals()
-						else
-							selectedItem = opt
-							selectedText.Text = opt
-							headerText.Text = opt
-							callback(opt)
-							Window.ClosePopup()
-						end
-					end))
+				for i, opt in ipairs(options) do
+					local rec = optionButtons[opt]
+					if not rec then
+						rec = createOptionButton(opt)
+						optionButtons[opt] = rec
+					end
+					if rec.btn.LayoutOrder ~= i then rec.btn.LayoutOrder = i end
 				end
 				updateVisuals()
 			end
-			
+
 			buildOptions(options)
 
 			local function updateStyle(style)
@@ -3390,6 +3407,7 @@ function Library.CreateWindow(arg1, arg2)
 				end
 			end
 			function api:SetOptions(newOpts)
+				if sameList(options, newOpts) then return end
 				buildOptions(newOpts)
 				if searchInputBar and searchInputBar.Text ~= "" then
 					local q = string.lower(searchInputBar.Text)
@@ -5663,13 +5681,11 @@ function Library.CreateWindow(arg1, arg2)
 				TS:Create(tabBtnPadding, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 0)}):Play() 
 			end
 	
-			page.Position = UDim2.new(0, 0, 0, FAST and 0 or 8)
+			page.Position = UDim2.new(0, 0, 0, 8)
 			page.Visible = true
-			if not FAST then
-				TS:Create(page, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
-					Position = UDim2.new(0, 0, 0, 0)
-				}):Play()
-			end
+			TS:Create(page, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+				Position = UDim2.new(0, 0, 0, 0)
+			}):Play()
 		end
 		
 		table.insert(Window._connections, tabButton.MouseButton1Click:Connect(activateTab))
@@ -6206,7 +6222,7 @@ function Library.CreateWindow(arg1, arg2)
 
 	local wmShadowStrokes = {}
 	for i = 1, shadowLayers do
-		local trans = 0.78 + (i * 0.045)
+		local trans = 0.8 + (i * 0.02)
 		local wmShadow = Instance.new("Frame")
 		wmShadow.Name = "WMShadowLayer" .. i
 		wmShadow.BackgroundTransparency = 1
@@ -6226,7 +6242,7 @@ function Library.CreateWindow(arg1, arg2)
 		wmShadowStroke.Color = Color3.fromRGB(0, 0, 0)
 		wmShadowStroke.Transparency = trans
 		wmShadowStroke:SetAttribute("TargetTransparency", trans)
-		wmShadowStroke.Thickness = i * 4
+		wmShadowStroke.Thickness = i * 2
 		wmShadowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		wmShadowStroke.Enabled = SIDEBAR_STATE.ShadowsEnabled
 		wmShadowStroke.Parent = wmShadow
@@ -6392,7 +6408,7 @@ function Library.CreateWindow(arg1, arg2)
 				end
 			end
 		end)
-		-- Самоочищающийся цикл, не добавляем в _connections.
+		table.insert(Window._connections, wmDragConn)
 	end
 
 	table.insert(Window._connections, watermarkHolder.InputBegan:Connect(function(input)
@@ -6673,7 +6689,7 @@ function Library.CreateWindow(arg1, arg2)
 					end
 				end
 			end)
-			-- Самоочищающийся цикл, не добавляем в _connections.
+			table.insert(Window._connections, kbStepConn)
 		end
 
 		UpdateKBDocking()
