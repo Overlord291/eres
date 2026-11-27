@@ -214,26 +214,16 @@ local function truncateTwoDots(text, font, size, maxW)
 	local dotsW = TextService:GetTextSize("..", size, font, Vector2.new(10000, 100)).X
 	local avail = maxW - dotsW
 	if avail <= 0 then return ".." end
-	local utfLen = utf8.len(text)
-	local len = utfLen or #text
-	local function prefix(n)
-		if not utfLen or n == len then return string.sub(text, 1, utfLen and #text or n) end
-		return string.sub(text, 1, utf8.offset(text, n + 1) - 1)
-	end
-	local lo, hi, best = 1, len, 0
-	while lo <= hi do
-		local mid = math.floor((lo + hi) / 2)
-		local sub = prefix(mid)
-		local w = TextService:GetTextSize(sub, size, font, Vector2.new(10000, 100)).X
-		if w <= avail then
-			best = mid
-			lo = mid + 1
-		else
-			hi = mid - 1
+	local len = utf8.len(text) or #text
+	for i = len, 1, -1 do
+		local offset = utf8.offset(text, i + 1)
+		local sub = string.sub(text, 1, offset and (offset - 1) or i)
+		local s = TextService:GetTextSize(sub, size, font, Vector2.new(10000, 100))
+		if s.X <= avail then
+			return sub .. ".."
 		end
 	end
-	if best == 0 then return ".." end
-	return prefix(best) .. ".."
+	return ".."
 end
 
 local function resolveKeycode(value)
@@ -286,21 +276,11 @@ Library.__index = Library
 
 local function createThemeSystem(ctx)
 	local THEME = ctx.THEME
-	local WEAK = { __mode = "k" }
-	local themeBindings = {} -- [themeKey] = weak{ [obj] = { [prop] = true } }
-	local activeProps = setmetatable({}, WEAK)
-	local cornerRegistry = {
-		Main = setmetatable({}, WEAK),
-		Element = setmetatable({}, WEAK),
-		HUD = setmetatable({}, WEAK)
-	}
-	local strokeRegistry = {
-		Block = setmetatable({}, WEAK),
-		Element = setmetatable({}, WEAK),
-		MainOutline = setmetatable({}, WEAK)
-	}
+	local themeBindings = {}
+	local activeProps = setmetatable({}, { __mode = "k" })
+	local cornerRegistry = { Main = {}, Element = {}, HUD = {} }
+	local strokeRegistry = { Block = {}, Element = {}, MainOutline = {} }
 	local doubleOutlines = {}
-	local doubleCounter = 0
 	local layoutBindings = {
 		ToggleBox = {}, ToggleLabel = {}, ComboToggle = {},
 		TopbarLayout = {}, TopbarPadding = {}, SearchContainer = {},
@@ -324,29 +304,15 @@ local function createThemeSystem(ctx)
 			map = {}
 			activeProps[obj] = map
 		end
-		local old = map[prop]
-		if old == themeKey then return end
-		-- убираем старую привязку (раньше она оставалась и копилась)
-		if old then
-			local oldList = themeBindings[old]
-			local oe = oldList and oldList[obj]
-			if oe then
-				oe[prop] = nil
-				if next(oe) == nil then oldList[obj] = nil end
-			end
-		end
+		if map[prop] == themeKey then return end
 		map[prop] = themeKey
+
 		local list = themeBindings[themeKey]
 		if not list then
-			list = setmetatable({}, WEAK)
+			list = {}
 			themeBindings[themeKey] = list
 		end
-		local e = list[obj]
-		if not e then
-			e = {}
-			list[obj] = e
-		end
-		e[prop] = true
+		table.insert(list, { obj = obj, prop = prop })
 	end
 
 	function ctx.ApplyTheme(obj, themeKey, prop)
@@ -370,40 +336,29 @@ local function createThemeSystem(ctx)
 		TS:Create(obj, tweenInfo or T_FAST, { [prop] = targetVal }):Play()
 	end
 
-	-- обновления темы склеиваются: не чаще раза в кадр
-	local dirty, flushQueued = {}, false
-	local function flush()
-		flushQueued = false
-		for key in pairs(dirty) do
-			dirty[key] = nil
-			local list = themeBindings[key]
-			if list then
-				for obj, props in pairs(list) do
-					for prop in pairs(props) do
-						setProp(obj, key, prop)
-					end
-				end
-			end
-		end
-	end
-
 	function ctx.UpdateTheme(themeKey, value)
-		if THEME[themeKey] == value then return end
 		THEME[themeKey] = value
-		dirty[themeKey] = true
-		if not flushQueued then
-			flushQueued = true
-			ctx.TrackConnection(RS.RenderStepped:Once(flush))
+		local list = themeBindings[themeKey]
+		if not list then return end
+		for i = #list, 1, -1 do
+			local entry = list[i]
+			local obj = entry.obj
+			local prop = entry.prop
+			local map = obj and activeProps[obj]
+			if not obj or not map or map[prop] ~= themeKey then
+				table.remove(list, i)
+			else
+				setProp(obj, themeKey, prop)
+			end
 		end
 	end
 
 	function ctx.RegisterCorner(corner, kind, offset)
 		local list = cornerRegistry[kind]
 		if not list then return end
-		offset = offset or 0
-		list[corner] = offset
+		table.insert(list, { corner = corner, offset = offset or 0 })
 		local base = kind == "Main" and ctx.MainRadius or (kind == "HUD" and ctx.HUDRadius or ctx.ElementRadius)
-		local r = (base == 0 and offset > 0) and 0 or math.max(0, base + offset)
+		local r = (base == 0 and offset and offset > 0) and 0 or math.max(0, base + (offset or 0))
 		corner.CornerRadius = UDim.new(0, r)
 	end
 
@@ -413,81 +368,70 @@ local function createThemeSystem(ctx)
 		else ctx.ElementRadius = radius end
 		local list = cornerRegistry[kind]
 		if not list then return end
-		for corner, off in pairs(list) do
-			local r = (radius == 0 and off > 0) and 0 or math.max(0, radius + off)
-			corner.CornerRadius = UDim.new(0, r)
+		for i = #list, 1, -1 do
+			local item = list[i]
+			if not item.corner or not item.corner.Parent then
+				table.remove(list, i)
+			else
+				local off = item.offset
+				local r = (radius == 0 and off > 0) and 0 or math.max(0, radius + off)
+				item.corner.CornerRadius = UDim.new(0, r)
+			end
 		end
 	end
 
-	-- lazy = true: рамка создаётся только когда реально нужна (Double Outline включён)
-	function ctx.AttachDoubleOutline(host, primaryStroke, cornerKind, fixedRadius, containerOverride, lazy)
-		local rec = { primary = primaryStroke }
+	function ctx.AttachDoubleOutline(host, primaryStroke, cornerKind, fixedRadius, containerOverride)
+		local parentTarget = containerOverride or host
+		local df = Instance.new("Frame")
+		df.Name = "DoubleOutlineFrame"
+		df.Size = UDim2.new(1, 2, 1, 2)
+		df.AnchorPoint = Vector2.new(0.5, 0.5)
+		df.Position = UDim2.new(0.5, 0, 0.5, 0)
+		df.BackgroundTransparency = 1
+		df.BorderSizePixel = 0
+		df.ZIndex = math.max(0, host.ZIndex)
+		df.Parent = parentTarget
 
-		local function build()
-			local df = Instance.new("Frame")
-			df.Name = "DoubleOutlineFrame"
-			df.Size = UDim2.new(1, 2, 1, 2)
-			df.AnchorPoint = Vector2.new(0.5, 0.5)
-			df.Position = UDim2.new(0.5, 0, 0.5, 0)
-			df.BackgroundTransparency = 1
-			df.BorderSizePixel = 0
-			df.ZIndex = math.max(0, host.ZIndex)
-			df.Parent = containerOverride or host
-
-			local dc = Instance.new("UICorner")
-			dc.Parent = df
-			if cornerKind == "Pill" then
-				dc.CornerRadius = UDim.new(1, 0)
-			elseif cornerKind then
-				ctx.RegisterCorner(dc, cornerKind, 1)
-			else
-				local r = fixedRadius or 0
-				dc.CornerRadius = UDim.new(0, r == 0 and 0 or (r + 1))
-			end
-
-			local ds = Instance.new("UIStroke")
-			ds.Name = "DoubleOutlineStroke"
-			ds.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-			ds.Thickness = 1
-			ds.Enabled = false
-			ds.Parent = df
-			ctx.ApplyTheme(ds, "Background", "Color")
-			rec.frame, rec.stroke = df, ds
+		local dc = Instance.new("UICorner")
+		dc.Parent = df
+		if cornerKind == "Pill" then
+			dc.CornerRadius = UDim.new(1, 0)
+		elseif cornerKind then
+			ctx.RegisterCorner(dc, cornerKind, 1)
+		else
+			local r = fixedRadius or 0
+			dc.CornerRadius = UDim.new(0, r == 0 and 0 or (r + 1))
 		end
 
-		function rec.sync()
-			local want = (THEME.DoubleOutline == true) and primaryStroke.Enabled
-			if want then
-				if not rec.frame then build() end
-				rec.stroke.Enabled = true
-			elseif rec.stroke then
-				rec.stroke.Enabled = false
-			end
-		end
+		local ds = Instance.new("UIStroke")
+		ds.Name = "DoubleOutlineStroke"
+		ds.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		ds.Thickness = 1
+		ds.Enabled = (THEME.DoubleOutline == true) and primaryStroke.Enabled
+		ds.Parent = df
+		ctx.ApplyTheme(ds, "Background", "Color")
 
-		if not lazy then build() end
+		table.insert(doubleOutlines, {
+			frame = df,
+			stroke = ds,
+			primary = primaryStroke
+		})
 
-		doubleCounter = doubleCounter + 1
-		if doubleCounter % 64 == 0 then
-			for i = #doubleOutlines, 1, -1 do
-				if not doubleOutlines[i].primary.Parent then table.remove(doubleOutlines, i) end
-			end
-		end
-		table.insert(doubleOutlines, rec)
+		ctx.TrackConnection(primaryStroke:GetPropertyChangedSignal("Enabled"):Connect(function()
+			ds.Enabled = (THEME.DoubleOutline == true) and primaryStroke.Enabled
+		end))
 
-		ctx.TrackConnection(primaryStroke:GetPropertyChangedSignal("Enabled"):Connect(rec.sync))
-		rec.sync()
-		return rec.stroke, rec.frame
+		return ds, df
 	end
 
 	function ctx.UpdateDoubleOutlineMode(enabled)
 		THEME.DoubleOutline = (enabled == true)
 		for i = #doubleOutlines, 1, -1 do
-			local rec = doubleOutlines[i]
-			if not rec.primary.Parent then
+			local item = doubleOutlines[i]
+			if not item.stroke or not item.stroke.Parent or not item.primary or not item.primary.Parent then
 				table.remove(doubleOutlines, i)
 			else
-				rec.sync()
+				item.stroke.Enabled = THEME.DoubleOutline and item.primary.Enabled
 			end
 		end
 	end
@@ -499,19 +443,19 @@ local function createThemeSystem(ctx)
 		s.Thickness = 1
 		if kind == "Block" then
 			s.Enabled = (THEME.InternalOutlines == "Only Blocks" or THEME.InternalOutlines == "All")
-			strokeRegistry.Block[s] = true
+			table.insert(strokeRegistry.Block, s)
 		elseif kind == "MainOutline" then
 			s.Enabled = THEME.MainOutlineEnabled
-			strokeRegistry.MainOutline[s] = true
+			table.insert(strokeRegistry.MainOutline, s)
 		elseif kind == "Always" then
 			s.Enabled = true
 		else
 			s.Enabled = (THEME.InternalOutlines == "Only Elements" or THEME.InternalOutlines == "All")
-			strokeRegistry.Element[s] = true
+			table.insert(strokeRegistry.Element, s)
 		end
 		s.Parent = obj
 		ctx.ApplyTheme(s, "Outlines", "Color")
-		ctx.AttachDoubleOutline(obj, s, cornerKind or "Element", nil, nil, kind ~= "MainOutline")
+		ctx.AttachDoubleOutline(obj, s, cornerKind or "Element")
 		return s
 	end
 
@@ -519,21 +463,36 @@ local function createThemeSystem(ctx)
 		THEME.InternalOutlines = opt
 		local showBlocks = (opt == "Only Blocks" or opt == "All")
 		local showElems = (opt == "Only Elements" or opt == "All")
-		for s in pairs(strokeRegistry.Block) do
-			local blockFrame = s.Parent
-			if blockFrame and not blockFrame:GetAttribute("IsDetached") then
-				s.Enabled = showBlocks
+		for i = #strokeRegistry.Block, 1, -1 do
+			local s = strokeRegistry.Block[i]
+			if not s or not s.Parent then
+				table.remove(strokeRegistry.Block, i)
+			else
+				local blockFrame = s.Parent
+				if not (blockFrame and blockFrame:GetAttribute("IsDetached")) then
+					s.Enabled = showBlocks
+				end
 			end
 		end
-		for s in pairs(strokeRegistry.Element) do
-			if s.Parent then s.Enabled = showElems end
+		for i = #strokeRegistry.Element, 1, -1 do
+			local s = strokeRegistry.Element[i]
+			if not s or not s.Parent then
+				table.remove(strokeRegistry.Element, i)
+			else
+				s.Enabled = showElems
+			end
 		end
 	end
 
 	function ctx.UpdateMainOutline(enabled)
 		THEME.MainOutlineEnabled = enabled
-		for s in pairs(strokeRegistry.MainOutline) do
-			if s.Parent then s.Enabled = enabled end
+		for i = #strokeRegistry.MainOutline, 1, -1 do
+			local s = strokeRegistry.MainOutline[i]
+			if not s or not s.Parent then
+				table.remove(strokeRegistry.MainOutline, i)
+			else
+				s.Enabled = enabled
+			end
 		end
 		if ctx.OnMainOutlineChanged then
 			ctx.OnMainOutlineChanged(enabled)
@@ -618,9 +577,6 @@ local function createThemeSystem(ctx)
 
 	function ctx.CleanupThemeSystem()
 		table.clear(themeBindings)
-		table.clear(activeProps)
-		table.clear(dirty)
-		for _, list in pairs(layoutBindings) do table.clear(list) end
 		table.clear(doubleOutlines)
 		table.clear(cornerRegistry.Main)
 		table.clear(cornerRegistry.Element)
@@ -1394,93 +1350,73 @@ local function createKeybindsHUD(ctx, keybindsEnabled)
 		end
 	end))
 
-	local lastSig = nil
 	local function UpdateKeybindList()
-		local items = {}
-		for uniqueId, element in pairs(ctx.Window._configElements) do
-			local t = element.Type
-			if t == "Toggle" or t == "Keybind" or t == "ButtonKeybind" then
-				local api = element.API
-				local success, data = pcall(api.Save, api)
-				if success and type(data) == "table" and data.Bind and data.Bind ~= "" and data.Bind ~= "Unknown" and data.Bind ~= "None" then
-					local keyTxt = shortKeys[data.Bind] or tostring(data.Bind)
-					if keyTxt ~= "" and keyTxt ~= "None" and keyTxt ~= "Unknown" then
-						table.insert(items, {
-							Id = uniqueId,
-							Name = tostring(uniqueId:match("~[^~]+~([^~]+)$") or uniqueId),
-							Key = keyTxt,
-							Active = (t == "Toggle" and data.State == true)
-						})
-					end
-				end
-			end
-		end
-		table.sort(items, function(a, b) return a.Id < b.Id end)
-
-		local parts = {}
-		for i, it in ipairs(items) do
-			parts[i] = it.Id .. "|" .. it.Key .. "|" .. (it.Active and "1" or "0")
-		end
-		local sig = table.concat(parts, ";")
-		if sig == lastSig then return end
-		lastSig = sig
-
 		for _, child in ipairs(kbEntries:GetChildren()) do
 			if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
 		end
+		local count = 0
+		for uniqueId, element in pairs(ctx.Window._configElements) do
+			local success, data = pcall(function() return element.API:Save() end)
+			if success and type(data) == "table" and data.Bind and data.Bind ~= "" and data.Bind ~= "Unknown" and data.Bind ~= "None" then
+				local shortKeyTxt = shortKeys[data.Bind] or tostring(data.Bind)
+				if shortKeyTxt ~= "None" and shortKeyTxt ~= "Unknown" and shortKeyTxt ~= "" then
+					count = count + 1
+					local itemName = uniqueId:match("~[^~]+~([^~]+)$") or uniqueId
+					local isToggle = (element.Type == "Toggle")
+					local isActive = (data.State == true)
 
-		for _, it in ipairs(items) do
-			local row = Instance.new("Frame")
-			row.Size = UDim2.new(1, 0, 0, 22)
-			row.BackgroundTransparency = 1
-			row.Parent = kbEntries
+					local row = Instance.new("Frame")
+					row.Size = UDim2.new(1, 0, 0, 22)
+					row.BackgroundTransparency = 1
+					row.Parent = kbEntries
 
-			local rowTitle = Instance.new("TextLabel")
-			rowTitle.Size = UDim2.new(1, -40, 1, 0)
-			rowTitle.BackgroundTransparency = 1
-			rowTitle.TextSize = 12
-			rowTitle.Text = it.Name
-			rowTitle.TextXAlignment = Enum.TextXAlignment.Left
-			rowTitle.TextTruncate = Enum.TextTruncate.AtEnd
-			rowTitle.Parent = row
-			ctx.ApplyTheme(rowTitle, "Text", "TextColor3")
-			ctx.ApplyTheme(rowTitle, "TextFont", "Font")
+					local rowTitle = Instance.new("TextLabel")
+					rowTitle.Size = UDim2.new(1, -40, 1, 0)
+					rowTitle.BackgroundTransparency = 1
+					rowTitle.TextSize = 12
+					rowTitle.Text = tostring(itemName)
+					rowTitle.TextXAlignment = Enum.TextXAlignment.Left
+					rowTitle.TextTruncate = Enum.TextTruncate.AtEnd
+					rowTitle.Parent = row
+					ctx.ApplyTheme(rowTitle, "Text", "TextColor3")
+					ctx.ApplyTheme(rowTitle, "TextFont", "Font")
 
-			local badge = Instance.new("Frame")
-			badge.Size = UDim2.new(0, 26, 0, 18)
-			badge.AnchorPoint = Vector2.new(1, 0.5)
-			badge.Position = UDim2.new(1, 0, 0.5, 0)
-			badge.AutomaticSize = Enum.AutomaticSize.X
-			badge.BorderSizePixel = 0
-			badge.Parent = row
-			ctx.ApplyTheme(badge, "Input", "BackgroundColor3")
-			ctx.ApplyTheme(badge, "InputTrans", "BackgroundTransparency")
+					local badge = Instance.new("Frame")
+					badge.Size = UDim2.new(0, 26, 0, 18)
+					badge.AnchorPoint = Vector2.new(1, 0.5)
+					badge.Position = UDim2.new(1, 0, 0.5, 0)
+					badge.AutomaticSize = Enum.AutomaticSize.X
+					badge.BorderSizePixel = 0
+					badge.Parent = row
+					ctx.ApplyTheme(badge, "Input", "BackgroundColor3")
+					ctx.ApplyTheme(badge, "InputTrans", "BackgroundTransparency")
 
-			local badgeCorner = Instance.new("UICorner")
-			badgeCorner.Parent = badge
-			ctx.RegisterCorner(badgeCorner, "HUD")
+					local badgeCorner = Instance.new("UICorner")
+					badgeCorner.Parent = badge
+					ctx.RegisterCorner(badgeCorner, "HUD")
 
-			local badgeStroke = Instance.new("UIStroke")
-			badgeStroke.Thickness = 1
-			badgeStroke.Parent = badge
-			ctx.ApplyTheme(badgeStroke, it.Active and "Accent" or "Outlines", "Color")
+					local badgeStroke = Instance.new("UIStroke")
+					badgeStroke.Thickness = 1
+					badgeStroke.Parent = badge
+					ctx.ApplyTheme(badgeStroke, (isToggle and isActive) and "Accent" or "Outlines", "Color")
 
-			local badgeTxt = Instance.new("TextLabel")
-			badgeTxt.Size = UDim2.new(1, 0, 1, 0)
-			badgeTxt.BackgroundTransparency = 1
-			badgeTxt.TextSize = 11
-			badgeTxt.Text = it.Key
-			badgeTxt.Parent = badge
-			ctx.ApplyTheme(badgeTxt, "SubtextFont", "Font")
-			ctx.ApplyTheme(badgeTxt, it.Active and "Accent" or "TextMuted", "TextColor3")
+					local badgeTxt = Instance.new("TextLabel")
+					badgeTxt.Size = UDim2.new(1, 0, 1, 0)
+					badgeTxt.BackgroundTransparency = 1
+					badgeTxt.TextSize = 11
+					badgeTxt.Text = shortKeyTxt
+					badgeTxt.Parent = badge
+					ctx.ApplyTheme(badgeTxt, "SubtextFont", "Font")
+					ctx.ApplyTheme(badgeTxt, (isToggle and isActive) and "Accent" or "TextMuted", "TextColor3")
 
-			local badgePad = Instance.new("UIPadding")
-			badgePad.PaddingLeft = UDim.new(0, 5)
-			badgePad.PaddingRight = UDim.new(0, 5)
-			badgePad.Parent = badgeTxt
+					local badgePad = Instance.new("UIPadding")
+					badgePad.PaddingLeft = UDim.new(0, 5)
+					badgePad.PaddingRight = UDim.new(0, 5)
+					badgePad.Parent = badgeTxt
+				end
+			end
 		end
 
-		local count = #items
 		local entriesH
 		if count == 0 then
 			local emptyLbl = Instance.new("TextLabel")
@@ -2877,13 +2813,7 @@ local function buildSliderElement(ctx, reg, slConfig)
 		return math.clamp(tonumber(string.format("%." .. decimals .. "f", snapped)) or snapped, min, max)
 	end
 	local function formatVal(val)
-		local s = string.format("%." .. decimals .. "f", val)
-		if decimals > 0 then
-			s = s:gsub("0+$", "")
-			s = s:gsub("%.$", "")
-		end
-		if s == "-0" or s == "" then s = "0" end
-		return s
+		return string.format("%." .. decimals .. "f", val)
 	end
 
 	local default = roundVal(slConfig.Default or min)
@@ -3017,7 +2947,7 @@ local function buildSliderElement(ctx, reg, slConfig)
 		local val = roundVal(min + span * rel)
 		if val ~= currentValue then
 			currentValue = val
-			applyVisual(val, false)
+			applyVisual(val, true)
 			callback(val)
 		end
 	end
@@ -3036,11 +2966,7 @@ local function buildSliderElement(ctx, reg, slConfig)
 
 	ctx.TrackConnection(valueInput.FocusLost:Connect(function()
 		local num = tonumber(valueInput.Text)
-		if not num or num ~= num or math.abs(num) == math.huge then
-			valueInput.Text = formatVal(currentValue)
-			return
-		end
-		local target = roundVal(num)
+		local target = num and roundVal(num) or min
 		currentValue = target
 		applyVisual(target, true)
 		callback(target)
@@ -3089,17 +3015,8 @@ local function buildRangeSliderElement(ctx, reg, slConfig)
 		local snapped = math.round(val / step) * step
 		return math.clamp(tonumber(string.format("%." .. decimals .. "f", snapped)) or snapped, min, max)
 	end
-	local function formatVal(val)
-		local s = string.format("%." .. decimals .. "f", val)
-		if decimals > 0 then
-			s = s:gsub("0+$", "")
-			s = s:gsub("%.$", "")
-		end
-		if s == "-0" or s == "" then s = "0" end
-		return s
-	end
 	local function formatPair(a, b)
-		return formatVal(a) .. " - " .. formatVal(b)
+		return string.format("%." .. decimals .. "f - %." .. decimals .. "f", a, b)
 	end
 
 	local defMin, defMax = min, max
@@ -3569,7 +3486,7 @@ local function buildToggleElement(ctx, reg, cfg)
 			end
 		end
 		fireCallback()
-		if hasKB and ctx.Window.UpdateKeybinds then ctx.Window.UpdateKeybinds() end
+		if ctx.Window.UpdateKeybinds then ctx.Window.UpdateKeybinds() end
 	end
 
 	if isMobile and hasKB then
@@ -5354,23 +5271,8 @@ function Library.CreateWindow(arg1, arg2)
 		}
 	}
 
-	local trackCount = 0
 	function ctx.TrackConnection(conn)
-		local list = Window._connections
-		list[#list + 1] = conn
-		trackCount = trackCount + 1
-		if trackCount >= 300 then
-			trackCount = 0
-			local n, j = #list, 0
-			for i = 1, n do
-				local c = list[i]
-				if c.Connected then
-					j = j + 1
-					list[j] = c
-				end
-			end
-			for i = j + 1, n do list[i] = nil end
-		end
+		table.insert(Window._connections, conn)
 		return conn
 	end
 
@@ -5714,8 +5616,6 @@ function Library.CreateWindow(arg1, arg2)
 	sidebarBgImage.ScaleType = Enum.ScaleType.Crop
 	sidebarBgImage.Visible = false
 	sidebarBgImage.Parent = sidebarVisuals
-	local sidebarBgCorner = Instance.new("UICorner")
-	sidebarBgCorner.Parent = sidebarBgImage
 	ctx.ApplyTheme(sidebarBgImage, "BgImageTrans", "ImageTransparency")
 	ctx.ApplyTheme(sidebarBgImage, "BackgroundImage", "Image")
 
@@ -6293,7 +6193,6 @@ function Library.CreateWindow(arg1, arg2)
 			sidebarBgImage.Visible = true
 			local rUDim = UDim.new(0, ctx.MainRadius)
 			svCorner.CornerRadius, sbCorner.CornerRadius, sidebarCorner.CornerRadius = rUDim, rUDim, rUDim
-			sidebarBgCorner.CornerRadius = rUDim
 			sidebar.Parent, sidebarVisuals.Parent = contentWrapper, contentWrapper
 			sidebarOutlineStroke.Enabled = THEME.MainOutlineEnabled
 			sidebarOutlineStroke.Transparency = 0
@@ -6315,7 +6214,6 @@ function Library.CreateWindow(arg1, arg2)
 			sidebarBgImage.Visible = false
 			local zUDim = UDim.new(0, 0)
 			svCorner.CornerRadius, sbCorner.CornerRadius, sidebarCorner.CornerRadius = zUDim, zUDim, zUDim
-			sidebarBgCorner.CornerRadius = zUDim
 			sidebar.Parent, sidebarVisuals.Parent = main, main
 			sidebarOutlineStroke.Enabled = false
 
