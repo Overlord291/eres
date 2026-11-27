@@ -5568,6 +5568,7 @@ function Library.CreateWindow(arg1, arg2)
 	contentWrapper.Position = UDim2.fromScale(0.5, 0.5)
 	contentWrapper.Size = UDim2.fromScale(1, 1)
 	contentWrapper.BackgroundTransparency = 1
+	contentWrapper.ZIndex = 2
 	contentWrapper.Parent = wrapper
 
 	local animScale = Instance.new("UIScale")
@@ -5647,7 +5648,7 @@ function Library.CreateWindow(arg1, arg2)
 	dragArea.Size = UDim2.new(1, 0, 0, 60)
 	dragArea.BackgroundTransparency = 1
 	dragArea.Active = true
-	dragArea.ZIndex = 10
+	dragArea.ZIndex = 1
 	dragArea.Parent = wrapper
 
 	local targetPos = wrapper.Position
