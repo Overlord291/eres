@@ -5496,7 +5496,8 @@ function Library.CreateWindow(arg1, arg2)
 	contentWrapper.BackgroundTransparency = 1
 	contentWrapper.Parent = wrapper
 
-	local main = Instance.new("CanvasGroup")
+	local main = Instance.new("Frame")
+	main.ClipsDescendants = true
 	main.Name = "MainFrame"
 	main.Size = UDim2.fromScale(1, 1)
 	main.BorderSizePixel = 0
@@ -5530,6 +5531,9 @@ function Library.CreateWindow(arg1, arg2)
 	bgImage.BackgroundTransparency = 1
 	bgImage.ScaleType = Enum.ScaleType.Crop
 	bgImage.Parent = main
+	local bgImageCorner = Instance.new("UICorner")
+	bgImageCorner.Parent = bgImage
+	ctx.RegisterCorner(bgImageCorner, "Main")
 	ctx.ApplyTheme(bgImage, "BgImageTrans", "ImageTransparency")
 	ctx.ApplyTheme(bgImage, "BackgroundImage", "Image")
 
@@ -5538,6 +5542,9 @@ function Library.CreateWindow(arg1, arg2)
 	bgColorOverlay.ZIndex = 1
 	bgColorOverlay.BorderSizePixel = 0
 	bgColorOverlay.Parent = main
+	local bgColorOverlayCorner = Instance.new("UICorner")
+	bgColorOverlayCorner.Parent = bgColorOverlay
+	ctx.RegisterCorner(bgColorOverlayCorner, "Main")
 	ctx.ApplyTheme(bgColorOverlay, "Background", "BackgroundColor3")
 	ctx.ApplyTheme(bgColorOverlay, "BackgroundTrans", "BackgroundTransparency")
 
@@ -5564,7 +5571,7 @@ function Library.CreateWindow(arg1, arg2)
 			if diffX > 0.1 or diffY > 0.1 then
 				wrapper.Position = wrapper.Position:Lerp(targetPos, 1 - math.exp(-28 * dt))
 			else
-				wrapper.Position = targetPos
+				if wrapper.Position ~= targetPos then wrapper.Position = targetPos end
 				if not draggingWindow then
 					dragConn:Disconnect()
 					dragConn = nil
@@ -6314,7 +6321,7 @@ function Library.CreateWindow(arg1, arg2)
 		else
 			sidebarBgImage.Visible = false
 			local zUDim = UDim.new(0, 0)
-			svCorner.CornerRadius, sbCorner.CornerRadius, sidebarCorner.CornerRadius = zUDim, zUDim, zUDim
+			svCorner.CornerRadius, sbCorner.CornerRadius, sidebarCorner.CornerRadius = zUDim, UDim.new(0, ctx.MainRadius), zUDim
 			sidebarBgCorner.CornerRadius = zUDim
 			sidebar.Parent, sidebarVisuals.Parent = main, main
 			sidebarOutlineStroke.Enabled = false
@@ -6483,7 +6490,7 @@ function Library.CreateWindow(arg1, arg2)
 
 	local function getAnimHideTransform(animType)
 		if animType == 2 then return UDim2.new(0, 0, 0, -20), UDim2.fromScale(1, 1)
-		elseif animType == 3 then return UDim2.fromScale(0.025, 0.025), UDim2.fromScale(0.95, 0.95)
+		elseif animType == 3 then return UDim2.new(0, 0, 0, 8), UDim2.fromScale(1, 1)
 		elseif animType == 4 then return UDim2.new(0, 25, 0, 0), UDim2.fromScale(1, 1)
 		else return UDim2.new(0, 0, 0, 20), UDim2.fromScale(1, 1) end
 	end
@@ -6496,7 +6503,7 @@ function Library.CreateWindow(arg1, arg2)
 			contentWrapper.Position, contentWrapper.Size = hidePos, hideSize
 			currentActiveTween = TS:Create(contentWrapper, animInfo, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.fromScale(1, 1) })
 			currentActiveTween:Play()
-			TS:Create(main, animInfo, { GroupTransparency = 0 }):Play()
+
 			if THEME.MainOutlineEnabled then
 				mainOutlineStroke.Enabled = true
 				TS:Create(mainOutlineStroke, animInfo, { Transparency = 0 }):Play()
@@ -6520,7 +6527,7 @@ function Library.CreateWindow(arg1, arg2)
 			Window.ClosePopup()
 			currentActiveTween = TS:Create(contentWrapper, animInfo, { Position = hidePos, Size = hideSize })
 			currentActiveTween:Play()
-			TS:Create(main, animInfo, { GroupTransparency = 1 }):Play()
+
 			TS:Create(mainOutlineStroke, animInfo, { Transparency = 1 }):Play()
 			if mainDoubleStroke then TS:Create(mainDoubleStroke, animInfo, { Transparency = 1 }):Play() end
 			if sidebarOutlineStroke.Enabled then TS:Create(sidebarOutlineStroke, animInfo, { Transparency = 1 }):Play() end
